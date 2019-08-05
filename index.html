@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Audio stream</title>
+</head>
+
+<body>
+    <button>Listen</button>
+    <p></p>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        // This variable holds a possibly dangling byte.
+        let rest = null;
+        let isFirstBuffer = true;
+        let numberOfChannels, sampleRate;
+        let audioCtx = new AudioContext();
+        let audioStack = [];
+        let nextTime = 0;
+        let scheduleBuffersTimeoutId = null;
+
+        document.querySelector("button").addEventListener("click", () => {
+                    var socket = io.connect(window.location.origin);
+                    socket.on('connect', () => {
+                            console.log("Connected from client-side");
+                            
+                            socket.emit("startAudio");
+                            document.querySelector("button").disabled=true;
+
+                            socket.on("audioPeice", (d) => {
+                                    if (d) {
+                                        let buffer, segment;
+
+                                        if (rest !== null) {
+                                            buffer = concat(rest, d);
+                                        } else {
+                                            buffer = d;
+                                        }
+
+                                        // Make sure that the first buffer is lager then 44 bytes.
+                                        if (isFirstBuffer && buffer.byteLength <= 44) {
+                                            rest = buffer;
+                                            return;
+                                        }
+
+                                        //Manipulations for buffer
+                                        if (isFirstBuffer) {
+                                            isFirstBuffer = false;
+
+                                            const dataView = new DataView(buffer);
+
+                                            numberOfChannels = dataView.getUint16(22, true);
+                                            sampleRate = dataView.getUint32(24, true);
+
+                                            buffer = buffer.slice(44);
+                                        }
+
+
+                                        if (buffer.byteLength % 2 !== 0) {
+                                            rest = buffer.slice(-2, -1);
+                                            buffer = buffer.slice(0, -1);
+                                        } else {
+                                            rest = null;
+                                        }
+
+                                        segment = {};
+
+                                        audioStack.push(segment);
+                                        //Push the segment to the stack
+
+                                        audioCtx
+                                            .decodeAudioData(wavify(buffer, numberOfChannels, sampleRate))
+                                            .then(audioBuffer => {
+                                                segment.buffer = audioBuffer;
+                                                //link the buffer with the pushed stack object
+                                                if (scheduleBuffersTimeoutId === null) { //Initial start condition
+                                                    scheduleBuffers();
+                                                }
+                                            });
+                                    }
+
+                                });
+
+
+                            });
+                    });
+
+
+                function scheduleBuffers() {
+                    while (
+                        audioStack.length > 0 &&
+                        audioStack[0].buffer !== undefined &&
+                        nextTime < audioCtx.currentTime+2
+                    ) {
+                        const currentTime = audioCtx.currentTime;
+
+                        const source = audioCtx.createBufferSource();
+
+                        const segment = audioStack.shift();
+
+                        source.buffer = segment.buffer;
+
+                        source.connect(audioCtx.destination);
+
+                        if (nextTime == 0) {
+                            nextTime = currentTime}
+
+                        let duration = source.buffer.duration;
+                        document.querySelector("p").innerHTML ="Playing segment of duration => "+duration;
+
+                        let offset = 0;
+
+                        if (currentTime > nextTime) {
+                            offset = currentTime - nextTime;
+                            nextTime = currentTime;
+                            duration = duration+offset;
+                        }
+
+                        source.start(nextTime, offset);
+                        source.stop(nextTime + duration);
+
+                        nextTime +=duration; // Make the next buffer wait the length of the last buffer before being played
+                    }
+                    //Recursion
+                    scheduleBuffersTimeoutId = setTimeout(() => scheduleBuffers(), 0);
+                };
+
+
+                const concat = (buffer1, buffer2) => {
+                    const tmp = new Uint8Array(buffer1.byteLength + buffer2.byteLength);
+
+                    tmp.set(new Uint8Array(buffer1), 0);
+                    tmp.set(new Uint8Array(buffer2), buffer1.byteLength);
+
+                    return tmp.buffer;
+                };
+
+//To convert an array buffer that contains a wav audio wav header is set before passed to decode
+                const wavify = (data, numberOfChannels, sampleRate) => {
+                    const header = new ArrayBuffer(44);
+
+                    var d = new DataView(header);
+
+                    d.setUint8(0, "R".charCodeAt(0));
+                    d.setUint8(1, "I".charCodeAt(0));
+                    d.setUint8(2, "F".charCodeAt(0));
+                    d.setUint8(3, "F".charCodeAt(0));
+
+                    d.setUint32(4, data.byteLength / 2 + 44, true);
+
+                    d.setUint8(8, "W".charCodeAt(0));
+                    d.setUint8(9, "A".charCodeAt(0));
+                    d.setUint8(10, "V".charCodeAt(0));
+                    d.setUint8(11, "E".charCodeAt(0));
+                    d.setUint8(12, "f".charCodeAt(0));
+                    d.setUint8(13, "m".charCodeAt(0));
+                    d.setUint8(14, "t".charCodeAt(0));
+                    d.setUint8(15, " ".charCodeAt(0));
+
+                    d.setUint32(16, 16, true);
+                    d.setUint16(20, 1, true);
+                    d.setUint16(22, numberOfChannels, true);
+                    d.setUint32(24, sampleRate, true);
+                    d.setUint32(28, sampleRate * 1 * 2);
+                    d.setUint16(32, numberOfChannels * 2);
+                    d.setUint16(34, 16, true);
+
+                    d.setUint8(36, "d".charCodeAt(0));
+                    d.setUint8(37, "a".charCodeAt(0));
+                    d.setUint8(38, "t".charCodeAt(0));
+                    d.setUint8(39, "a".charCodeAt(0));
+                    d.setUint32(40, data.byteLength, true);
+
+                    return concat(header, data);
+                };
+    </script>
+</body>
+
+</html>
